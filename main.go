@@ -2,17 +2,17 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/Xiol/tinycache"
 	"github.com/gorilla/mux"
 	"github.com/rs/zerolog/log"
+	flag "github.com/spf13/pflag"
 )
 
 var (
@@ -28,90 +28,23 @@ type FileInfo struct {
 	Items []FileInfo `json:"items,omitempty"`
 }
 
-var cache = tinycache.New[FileInfo](
-	tinycache.WithTTL(24*time.Hour),
-	tinycache.WithReapInterval(1*time.Hour),
-)
-
-func scan(dir string) ([]FileInfo, error) {
-	var files []FileInfo
-
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-
-	for _, entry := range entries {
-		// Skip hidden files and folders
-		if entry.Name()[0] == '.' {
-			continue
-		}
-
-		fullPath := filepath.Join(dir, entry.Name())
-
-		if entry.IsDir() {
-			subItems, err := scan(fullPath)
-			if err != nil {
-				return nil, err
-			}
-			files = append(files, FileInfo{
-				Name:  entry.Name(),
-				Type:  TYPE_FOLDER,
-				Path:  fullPath,
-				Items: subItems,
-			})
-		} else {
-			info, err := entry.Info()
-			if err != nil {
-				return nil, err
-			}
-			files = append(files, FileInfo{
-				Name: entry.Name(),
-				Type: TYPE_FILE,
-				Path: fullPath,
-				Size: info.Size(),
-			})
-		}
-	}
-
-	return files, nil
-}
-
-func handler(w http.ResponseWriter, r *http.Request) {
-	var root FileInfo
-	root, ok := cache.Get("files")
-	if !ok {
-		log.Debug().Msg("Cache miss, scanning directory")
-		dir := "files"
-
-		items, err := scan(dir)
-		if err != nil {
-			http.Error(w, "Error scanning directory: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		root = FileInfo{
-			Name:  "files",
-			Type:  TYPE_FOLDER,
-			Path:  "files",
-			Items: items,
-		}
-
-		cache.Set("files", root)
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(root); err != nil {
-		http.Error(w, "Failed to encode JSON: "+err.Error(), http.StatusInternalServerError)
-	}
-}
-
 func main() {
-	defer cache.Close()
+	path := flag.String("path", "files", "relative path to the files directory")
+	port := flag.Int("port", 8080, "port to listen on")
+	flag.Parse()
+
 	r := mux.NewRouter()
 
-	r.HandleFunc("/files.json", handler).Methods("GET")
-	r.PathPrefix("/files/").Handler(http.StripPrefix("/files/", http.FileServer(http.Dir("./files"))))
+	cache := tinycache.New[FileInfo](
+		tinycache.WithTTL(24*time.Hour),
+		tinycache.WithReapInterval(1*time.Hour),
+	)
+	defer cache.Close()
+
+	handler := NewFileHandler(*path, cache)
+
+	r.HandleFunc("/files.json", handler.Handle).Methods("GET")
+	r.PathPrefix("/files/").Handler(http.StripPrefix("/files/", http.FileServer(http.Dir(*path))))
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("./static")))
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -122,11 +55,12 @@ func main() {
 		log.Info().Msg("Caught signal, shutting down..")
 		cancel()
 	}()
-	server := &http.Server{Addr: ":8080", Handler: r}
+	server := &http.Server{Addr: fmt.Sprintf(":%d", *port), Handler: r}
 
 	var err error
 	go func() {
 		err = server.ListenAndServe()
+		cancel()
 	}()
 
 	log.Info().Msg("Server started")
