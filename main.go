@@ -44,7 +44,7 @@ func main() {
 
 	handler := NewFileHandler(*path, afero.NewOsFs(), cache)
 	// Warm cache with initial scan
-	log.Info().Msg("Warming file handler cache...")
+	log.Info().Msg("Warming file handler cache..")
 	_, err := handler.GetFiles()
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to warm file handler cache")
