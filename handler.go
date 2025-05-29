@@ -2,18 +2,47 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
-	"os"
 	"path/filepath"
+	"time"
 
-	"github.com/Xiol/tinycache"
 	"github.com/rs/zerolog/log"
+	"github.com/spf13/afero"
 )
 
-func scan(dir string) ([]FileInfo, error) {
+type Cacher[T any] interface {
+	Delete(key string)
+	Set(key string, value T)
+	SetTTL(key string, value T, ttl time.Duration)
+	SetPermanent(key string, value T)
+	Get(key string) (T, bool)
+	Reap()
+	Close()
+}
+
+type Handler interface {
+	Handle(w http.ResponseWriter, r *http.Request)
+}
+
+type FileHandler struct {
+	dir   string
+	cache Cacher[FileInfo]
+	fs    afero.Fs
+}
+
+func NewFileHandler(dir string, fs afero.Fs, cache Cacher[FileInfo]) *FileHandler {
+	return &FileHandler{
+		dir:   dir,
+		cache: cache,
+		fs:    fs,
+	}
+}
+
+func (h *FileHandler) scan(dir string) ([]FileInfo, error) {
 	var files []FileInfo
 
-	entries, err := os.ReadDir(dir)
+	entries, err := afero.ReadDir(h.fs, dir)
 	if err != nil {
 		return nil, err
 	}
@@ -27,7 +56,7 @@ func scan(dir string) ([]FileInfo, error) {
 		fullPath := filepath.Join(dir, entry.Name())
 
 		if entry.IsDir() {
-			subItems, err := scan(fullPath)
+			subItems, err := h.scan(fullPath)
 			if err != nil {
 				return nil, err
 			}
@@ -38,15 +67,11 @@ func scan(dir string) ([]FileInfo, error) {
 				Items: subItems,
 			})
 		} else {
-			info, err := entry.Info()
-			if err != nil {
-				return nil, err
-			}
 			files = append(files, FileInfo{
 				Name: entry.Name(),
 				Type: TYPE_FILE,
 				Path: fullPath,
-				Size: info.Size(),
+				Size: entry.Size(),
 			})
 		}
 	}
@@ -54,46 +79,38 @@ func scan(dir string) ([]FileInfo, error) {
 	return files, nil
 }
 
-type Handler interface {
-	Handle(w http.ResponseWriter, r *http.Request)
-}
-
-type FileHandler struct {
-	dir   string
-	cache *tinycache.Cache[FileInfo]
-}
-
-func NewFileHandler(dir string, cache *tinycache.Cache[FileInfo]) *FileHandler {
-	return &FileHandler{
-		dir:   dir,
-		cache: cache,
-	}
-}
-
-func (h *FileHandler) Handle(w http.ResponseWriter, r *http.Request) {
-	var root FileInfo
-	root, ok := h.cache.Get("files")
+func (h *FileHandler) GetFiles() (FileInfo, error) {
+	files, ok := h.cache.Get("files")
 	if !ok {
 		log.Debug().Msg("Cache miss, scanning directory")
 
-		items, err := scan(h.dir)
+		items, err := h.scan(h.dir)
 		if err != nil {
-			http.Error(w, "Error scanning directory: "+err.Error(), http.StatusInternalServerError)
-			return
+			return FileInfo{}, fmt.Errorf("error scanning directory: %w", err)
 		}
 
-		root = FileInfo{
+		files = FileInfo{
 			Name:  h.dir,
 			Type:  TYPE_FOLDER,
 			Path:  h.dir,
 			Items: items,
 		}
 
-		h.cache.Set("files", root)
+		h.cache.Set("files", files)
+	}
+
+	return files, nil
+}
+
+func (h *FileHandler) Handle(w http.ResponseWriter, r *http.Request) {
+	files, err := h.GetFiles()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(root); err != nil {
+	if err := json.NewEncoder(w).Encode(files); err != nil {
 		http.Error(w, "Failed to encode JSON: "+err.Error(), http.StatusInternalServerError)
 	}
 }

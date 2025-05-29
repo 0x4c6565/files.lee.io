@@ -12,6 +12,7 @@ import (
 	"github.com/Xiol/tinycache"
 	"github.com/gorilla/mux"
 	"github.com/rs/zerolog/log"
+	"github.com/spf13/afero"
 	flag "github.com/spf13/pflag"
 )
 
@@ -41,8 +42,18 @@ func main() {
 	)
 	defer cache.Close()
 
-	handler := NewFileHandler(*path, cache)
+	handler := NewFileHandler(*path, afero.NewOsFs(), cache)
+	// Warm cache with initial scan
+	log.Info().Msg("Warming file handler cache...")
+	_, err := handler.GetFiles()
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to warm file handler cache")
+	}
 
+	r.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("pong"))
+	})
 	r.HandleFunc("/files.json", handler.Handle).Methods("GET")
 	r.PathPrefix("/files/").Handler(http.StripPrefix("/files/", http.FileServer(http.Dir(*path))))
 	r.PathPrefix("/").Handler(http.FileServer(http.Dir("./static")))
@@ -57,7 +68,6 @@ func main() {
 	}()
 	server := &http.Server{Addr: fmt.Sprintf(":%d", *port), Handler: r}
 
-	var err error
 	go func() {
 		err = server.ListenAndServe()
 		cancel()
